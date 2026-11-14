@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using RimWorld;
@@ -240,6 +239,139 @@ namespace StackBehaviorOverhaul
 
             if (__instance.HitPoints <= 0)
                 __instance.Destroy(DestroyMode.Vanish);
+        }
+    }
+
+    internal static class StackMarketValue
+    {
+        internal static float AdjustedPerItemValue(Thing thing, float currentValue)
+        {
+            if (thing == null ||
+                thing.stackCount <= 1 ||
+                thing.def.stackLimit <= 1 ||
+                thing.HitPoints >= thing.MaxHitPoints ||
+                thing.MaxHitPoints <= 0)
+            {
+                return currentValue;
+            }
+
+            int currentHitPoints = thing.HitPoints;
+            float fullHealthValue;
+            try
+            {
+                thing.HitPoints = thing.MaxHitPoints;
+                fullHealthValue = thing.MarketValue;
+            }
+            finally
+            {
+                thing.HitPoints = currentHitPoints;
+            }
+
+            return (float)(((double)currentValue + (double)fullHealthValue * (thing.stackCount - 1)) /
+                thing.stackCount);
+        }
+
+    }
+
+    [HarmonyPatch(typeof(Thing), "get_MarketValue")]
+    internal static class ThingMarketValuePatch
+    {
+        static void Postfix(Thing __instance, ref float __result)
+        {
+            __result = StackMarketValue.AdjustedPerItemValue(__instance, __result);
+        }
+    }
+
+    [HarmonyPatch]
+    internal static class TradeableMatchingDamagedStackPatch
+    {
+        static MethodBase TargetMethod()
+        {
+            return AccessTools.Method(typeof(TransferableUtility), "TradeableMatching",
+                new[] { typeof(Thing), typeof(List<Tradeable>) });
+        }
+
+        static bool Prefix(Thing __0, List<Tradeable> __1, ref Tradeable __result)
+        {
+            Thing thing = __0;
+            if (thing == null || __1 == null || thing.def.stackLimit <= 1 || thing.MaxHitPoints <= 0)
+                return true;
+
+            bool thingDamaged = thing.HitPoints < thing.MaxHitPoints;
+            foreach (Tradeable tradeable in __1)
+            {
+                Thing existing = tradeable.AnyThing;
+                if (existing == null ||
+                    existing.def != thing.def ||
+                    existing.MaxHitPoints <= 0)
+                {
+                    continue;
+                }
+
+                if (thingDamaged != (existing.HitPoints < existing.MaxHitPoints))
+                {
+                    __result = null;
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
+    [HarmonyPatch]
+    internal static class TradeDealSplitDamagedStackPatch
+    {
+        private static readonly MethodInfo AddToTradeablesMethod = AccessTools.Method(
+            typeof(TradeDeal), "AddToTradeables", new[] { typeof(Thing), typeof(Transactor) });
+
+        static MethodBase TargetMethod()
+        {
+            return AddToTradeablesMethod;
+        }
+
+        static void Prefix(TradeDeal __instance, Thing t, Transactor trans)
+        {
+            if (t == null ||
+                t.stackCount <= 1 ||
+                t.def.stackLimit <= 1 ||
+                t.MaxHitPoints <= 0 ||
+                t.HitPoints >= t.MaxHitPoints)
+            {
+                return;
+            }
+
+            ThingOwner owner = t.holdingOwner;
+            bool wasSpawned = t.Spawned;
+            Map map = t.Map;
+            IntVec3 position = t.Position;
+            Rot4 rotation = t.Rotation;
+            int originalHitPoints = t.HitPoints;
+            Thing damagedItem = t.SplitOff(1);
+
+            bool attached;
+            if (owner != null)
+            {
+                attached = owner.TryAdd(damagedItem, false);
+            }
+            else if (wasSpawned && map != null)
+            {
+                GenSpawn.Spawn(damagedItem, position, map, rotation, WipeMode.VanishOrMoveAside, false, false);
+                attached = damagedItem.Spawned;
+            }
+            else
+            {
+                attached = false;
+            }
+
+            if (!attached)
+            {
+                t.stackCount++;
+                t.HitPoints = originalHitPoints;
+                return;
+            }
+
+            AddToTradeablesMethod.Invoke(__instance, new object[] { damagedItem, trans });
         }
     }
 
