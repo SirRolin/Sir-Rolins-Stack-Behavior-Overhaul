@@ -9,6 +9,10 @@
     <OutputPath>Assemblies\</OutputPath>
   </PropertyGroup>
 
+  <Target Name="RemoveLegacyAssembly" BeforeTargets="Build">
+    <Delete Files="$(MSBuildProjectDirectory)\Assemblies\SirRolinsProperDamagedStackBehavior.dll;$(MSBuildProjectDirectory)\Assemblies\SirRolinsProperDamagedStackBehavior.pdb;$(MSBuildProjectDirectory)\Assemblies\SirRolinsProperDamagedStackBehavior.deps.json" />
+  </Target>
+
   <ItemGroup>
     <Reference Include="0Harmony">
       <HintPath>..\..\..\..\workshop\content\294100\2009463077\1.7\Assemblies\0Harmony.dll</HintPath>
