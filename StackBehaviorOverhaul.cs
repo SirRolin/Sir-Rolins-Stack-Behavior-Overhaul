@@ -35,7 +35,10 @@ namespace StackBehaviorOverhaul
                 return false;
 
             int maxHitPoints = __instance.MaxHitPoints;
-            if (__instance.stackCount <= 1 || __instance.HitPoints > 0 || maxHitPoints <= 0)
+            if (!__instance.def.useHitPoints ||
+                __instance.stackCount <= 1 ||
+                __instance.HitPoints > 0 ||
+                maxHitPoints <= 0)
                 return true;
 
             while (__instance.HitPoints <= 0 && __instance.stackCount > 1)
@@ -75,7 +78,11 @@ namespace StackBehaviorOverhaul
                 dinfo.SetAmount(dinfo.Amount * scaling);
             }
 
-            if (__instance.stackCount <= 1 || maxHitPoints <= 0 || __instance.HitPoints <= 0 || dinfo.Amount <= 0f)
+            if (!__instance.def.useHitPoints ||
+                __instance.stackCount <= 1 ||
+                maxHitPoints <= 0 ||
+                __instance.HitPoints <= 0 ||
+                dinfo.Amount <= 0f)
                 return;
 
             long combinedHitPoints = (long)__instance.HitPoints + (long)(__instance.stackCount - 1) * maxHitPoints;
@@ -177,6 +184,8 @@ namespace StackBehaviorOverhaul
             if (__result != null &&
                 __state.SplitCount > 0 &&
                 __state.SplitCount < __state.OriginalStackCount &&
+                __instance.def.useHitPoints &&
+                __instance.MaxHitPoints > 0 &&
                 __instance.stackCount > 0)
             {
                 __instance.HitPoints = __instance.MaxHitPoints;
@@ -201,16 +210,24 @@ namespace StackBehaviorOverhaul
             return AccessTools.Method(typeof(Thing), nameof(Thing.TryAbsorbStack), new[] { typeof(Thing), typeof(bool) });
         }
 
-        static void Prefix(Thing __instance, Thing other, out MergeState __state)
+        static bool Prefix(Thing __instance, Thing other, ref bool __result, out MergeState __state)
         {
             __state = default(MergeState);
             if (other == null ||
                 __instance.def.stackLimit <= 1 ||
                 other.def != __instance.def ||
                 other.MaxHitPoints != __instance.MaxHitPoints ||
+                !__instance.def.useHitPoints ||
                 __instance.MaxHitPoints <= 0)
             {
-                return;
+                return true;
+            }
+
+            if (__instance.HitPoints < __instance.MaxHitPoints &&
+                other.HitPoints < other.MaxHitPoints)
+            {
+                __result = false;
+                return false;
             }
 
             __state = new MergeState
@@ -221,6 +238,7 @@ namespace StackBehaviorOverhaul
                 OtherHitPoints = other.HitPoints,
                 MaxHitPoints = __instance.MaxHitPoints
             };
+            return true;
         }
 
         static void Postfix(Thing __instance, bool __result, MergeState __state)
@@ -249,6 +267,7 @@ namespace StackBehaviorOverhaul
             if (thing == null ||
                 thing.stackCount <= 1 ||
                 thing.def.stackLimit <= 1 ||
+                !thing.def.useHitPoints ||
                 thing.HitPoints >= thing.MaxHitPoints ||
                 thing.MaxHitPoints <= 0)
             {
@@ -294,7 +313,11 @@ namespace StackBehaviorOverhaul
         static bool Prefix(Thing __0, List<Tradeable> __1, ref Tradeable __result)
         {
             Thing thing = __0;
-            if (thing == null || __1 == null || thing.def.stackLimit <= 1 || thing.MaxHitPoints <= 0)
+            if (thing == null ||
+                __1 == null ||
+                thing.def.stackLimit <= 1 ||
+                !thing.def.useHitPoints ||
+                thing.MaxHitPoints <= 0)
                 return true;
 
             bool thingDamaged = thing.HitPoints < thing.MaxHitPoints;
@@ -303,6 +326,7 @@ namespace StackBehaviorOverhaul
                 Thing existing = tradeable.AnyThing;
                 if (existing == null ||
                     existing.def != thing.def ||
+                    !existing.def.useHitPoints ||
                     existing.MaxHitPoints <= 0)
                 {
                     continue;
@@ -324,6 +348,13 @@ namespace StackBehaviorOverhaul
     {
         private static readonly MethodInfo AddToTradeablesMethod = AccessTools.Method(
             typeof(TradeDeal), "AddToTradeables", new[] { typeof(Thing), typeof(Transactor) });
+        private static readonly List<SplitRecord> PendingSplits = new List<SplitRecord>();
+
+        private struct SplitRecord
+        {
+            public Thing Original;
+            public Thing Damaged;
+        }
 
         static MethodBase TargetMethod()
         {
@@ -335,6 +366,7 @@ namespace StackBehaviorOverhaul
             if (t == null ||
                 t.stackCount <= 1 ||
                 t.def.stackLimit <= 1 ||
+                !t.def.useHitPoints ||
                 t.MaxHitPoints <= 0 ||
                 t.HitPoints >= t.MaxHitPoints)
             {
@@ -371,7 +403,52 @@ namespace StackBehaviorOverhaul
                 return;
             }
 
+            PendingSplits.Add(new SplitRecord { Original = t, Damaged = damagedItem });
             AddToTradeablesMethod.Invoke(__instance, new object[] { damagedItem, trans });
+        }
+
+        internal static void RestorePendingSplits()
+        {
+            foreach (SplitRecord split in PendingSplits)
+            {
+                Thing original = split.Original;
+                Thing damaged = split.Damaged;
+                if (original == null || damaged == null || original.Destroyed || damaged.Destroyed)
+                    continue;
+
+                ThingOwner owner = original.holdingOwner;
+                if (owner != null && damaged.holdingOwner == owner)
+                {
+                    if (owner.Remove(damaged) &&
+                        !owner.TryAdd(damaged, true) &&
+                        !owner.TryAdd(damaged, false))
+                    {
+                        Log.Error("Failed to restore a damaged trade stack to its original owner.");
+                    }
+
+                    continue;
+                }
+
+                if (original.Spawned && damaged.Spawned && original.Map == damaged.Map)
+                    original.TryAbsorbStack(damaged, true);
+            }
+
+            PendingSplits.Clear();
+        }
+    }
+
+    [HarmonyPatch]
+    internal static class TradeWindowClosePatch
+    {
+        static MethodBase TargetMethod()
+        {
+            return AccessTools.Method(typeof(Window), "PostClose");
+        }
+
+        static void Postfix(Window __instance)
+        {
+            if (__instance is Dialog_Trade)
+                TradeDealSplitDamagedStackPatch.RestorePendingSplits();
         }
     }
 
